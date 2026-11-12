@@ -28,7 +28,9 @@ python3 -m py_compile grab tests/*.py tests/fakes/*.py
 bash -n bin/ci .githooks/pre-push
 
 stage "leak scan"
-if git ls-files -z | xargs -0 grep -nIE '/home/[a-z]|/Users/[A-Za-z]|192\.168\.[0-9]|10\.[0-9]+\.[0-9]+\.[0-9]+|[A-Za-z0-9._%+-]+@(gmail|outlook|hotmail|icloud)\.com' 2>/dev/null; then
+# git grep reads every tracked file in one process and exits 0 only on a match. The patterns
+# are a tripwire for common leaks, not proof that nothing personal is in the repo.
+if git grep -nIE '/home/[a-z]|/Users/[A-Za-z]|192\.168\.[0-9]|10\.[0-9]+\.[0-9]+\.[0-9]+|[A-Za-z0-9._%+-]+@(gmail|outlook|hotmail|icloud)\.com'; then
   fail "personal path, LAN address or e-mail address in a tracked file (lines above)"
 fi
 

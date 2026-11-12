@@ -71,6 +71,47 @@ class GrabTest(unittest.TestCase):
         self.assertIn("cut short", r.stderr)
         self.assertEqual((self.folder() / "transcript.txt").read_text(), "block 4\n")
 
+    def test_truncated_audio_in_webm_is_caught(self):
+        # WebM has no per-stream durations: the container length must not stand in for
+        # the audio length, or a 1-second track in a 4-second video looks complete.
+        r = self.run_grab("https://example.com/v?ext=webm&mode=truncated")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("cut short", r.stderr)
+        self.assertEqual(len(self.ytdlp_calls()), 2)
+        self.assertEqual((self.folder() / "transcript.txt").read_text(), "block 4\n")
+
+    def test_complete_webm_is_accepted_without_retry(self):
+        r = self.run_grab("https://example.com/v?ext=webm")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.ytdlp_calls()), 1)
+
+    def test_audio_still_short_after_retry_fails_the_url(self):
+        r = self.run_grab("https://example.com/v?mode=alwaysshort")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no format with complete audio", r.stderr)
+        self.assertEqual(r.stdout, "")
+        self.assertEqual(self.stt_calls(), [])
+
+    def test_silent_video_is_kept_when_not_transcribing(self):
+        r = self.run_grab("--no-transcribe", "https://example.com/v?mode=silent")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(len(self.ytdlp_calls()), 1)
+        self.assertTrue((self.folder() / "video.mp4").exists())
+
+    def test_silent_video_fails_when_transcribing(self):
+        r = self.run_grab("https://example.com/v?mode=silent")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("no format with complete audio", r.stderr)
+
+    def test_corrupt_file_fails_that_url_and_the_batch_goes_on(self):
+        r = self.run_grab("https://example.com/v?id=bad&mode=corrupt",
+                          "https://example.com/v?id=good")
+        self.assertEqual(r.returncode, 1)
+        self.assertEqual(r.stdout.strip(), str(self.out / "tester_good"))
+        self.assertIn("1 of 2 failed", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertTrue((self.out / "tester_good" / "transcript.txt").exists())
+
     def test_cookies_are_passed_to_ytdlp(self):
         r = self.run_grab("--cookies-from-browser", "chrome", "https://example.com/v/1")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -114,6 +155,19 @@ class GrabTest(unittest.TestCase):
         r = self.run_grab("-f", str(urls), "--no-transcribe")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual([c[-1] for c in self.ytdlp_calls()], ["https://example.com/v/1"])
+
+    def test_url_file_keeps_fragments_inside_urls(self):
+        urls = self.tmp / "urls.txt"
+        urls.write_text("https://example.com/v/1#t=30 # start at 30 s\n")
+        r = self.run_grab("-f", str(urls), "--no-transcribe")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([c[-1] for c in self.ytdlp_calls()], ["https://example.com/v/1#t=30"])
+
+    def test_missing_url_file_is_a_usage_error(self):
+        r = self.run_grab("-f", str(self.tmp / "nope.txt"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cannot read", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
 
     def test_missing_stt_command_stops_before_download(self):
         r = self.run_grab("https://example.com/v/1", GRAB_STT_CMD="no-such-stt-command")

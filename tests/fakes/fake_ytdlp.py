@@ -5,42 +5,63 @@ It appends its argv to $FAKE_LOG, makes a real media file with ffmpeg at the pat
 that the -o template gives, writes video.info.json next to it, and prints the path,
 like `yt-dlp --print after_move:filepath`.
 
-FAKE_MODE:
-  ok         video and audio of FAKE_DURATION seconds (default 4)
-  truncated  audio only 1 second long, unless "-f b" is passed (the TikTok case)
-  fail       exit 1 with no output (a site that refuses the download)
+The URL query sets the behavior, so one batch can mix cases:
+  id=NAME      video id, so the folder is tester_NAME (default vid1)
+  mode=MODE    see below; $FAKE_MODE is the default
+  ext=webm     VP9 + Opus in WebM (no per-stream durations) instead of H.264 + AAC in MP4
+  dur=SECONDS  length (default $FAKE_DURATION, else 4)
+
+MODE:
+  ok           video and audio of the same length
+  truncated    audio 1 second long, unless "-f b" is passed (the TikTok case)
+  alwaysshort  audio 1 second long, also with "-f b"
+  silent       video with no audio stream
+  corrupt      a file that is not media at all
+  fail         exit 1 with no output (a site that refuses the download)
 """
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 argv = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(argv) + "\n")
 
-mode = os.environ.get("FAKE_MODE", "ok")
+query = {k: v[0] for k, v in parse_qs(urlparse(argv[-1]).query).items()}
+mode = query.get("mode", os.environ.get("FAKE_MODE", "ok"))
 if mode == "fail":
     print("ERROR: login required", file=sys.stderr)
     sys.exit(1)
 
+ext = query.get("ext", "mp4")
 template = argv[argv.index("-o") + 1]
 fmt = argv[argv.index("-f") + 1] if "-f" in argv else None
-path = Path(template.replace("%(uploader)s", "tester").replace("%(id)s", "vid1")
-            .replace("%(ext)s", "mp4"))
+path = Path(template.replace("%(uploader)s", "tester")
+            .replace("%(id)s", query.get("id", "vid1")).replace("%(ext)s", ext))
 if path.exists():  # yt-dlp skips a file that is already there
     print(path)
     sys.exit(0)
 path.parent.mkdir(parents=True, exist_ok=True)
-
-duration = float(os.environ.get("FAKE_DURATION", "4"))
-audio = 1.0 if mode == "truncated" and fmt != "b" else duration
-subprocess.run(
-    ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
-     "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={duration}",
-     "-f", "lavfi", "-i", f"sine=frequency=440:duration={audio}",
-     "-c:v", "libx264", "-c:a", "aac", str(path)],
-    check=True)
 (path.parent / "video.info.json").write_text(json.dumps({"id": "vid1", "uploader": "tester"}))
+
+if mode == "corrupt":
+    path.write_bytes(b"this is not a video\n" * 100)
+    print(path)
+    sys.exit(0)
+
+duration = float(query.get("dur", os.environ.get("FAKE_DURATION", "4")))
+short = mode == "alwaysshort" or (mode == "truncated" and fmt != "b")
+audio = 1.0 if short else duration
+cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+       "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={duration}"]
+if mode != "silent":
+    cmd += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={audio}"]
+if ext == "webm":
+    cmd += ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-c:a", "libopus"]
+else:
+    cmd += ["-c:v", "libx264", "-c:a", "aac"]
+subprocess.run(cmd + [str(path)], check=True)
 print(path)
