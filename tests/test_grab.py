@@ -85,6 +85,12 @@ class GrabTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(len(self.ytdlp_calls()), 1)
 
+    def test_bad_mirror_of_b_falls_back_to_another_combined_format(self):
+        r = self.run_grab("https://example.com/v?mode=mirror")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        formats = [a[a.index("-f") + 1] for a in self.ytdlp_calls() if "-f" in a]
+        self.assertEqual(formats, ["b", "h264-1", "h264-0"])  # audio-only and video-only skipped
+
     def test_audio_still_short_after_retry_fails_the_url(self):
         r = self.run_grab("https://example.com/v?mode=alwaysshort")
         self.assertEqual(r.returncode, 1)
