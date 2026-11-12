@@ -17,6 +17,8 @@ MODE:
   alwaysshort  audio 1 second long, also with "-f b"
   silent       video with no audio stream
   mirror       audio 1 second long for every format except "-f h264-0" (a bad mirror of "b")
+  mirrorsilent no audio stream for every format except "-f h264-0"
+  mirrorbad    like mirror, but "-f h264-1" is not media at all
   corrupt      a file that is not media at all
   fail         exit 1 with no output (a site that refuses the download)
 """
@@ -52,18 +54,18 @@ path.parent.mkdir(parents=True, exist_ok=True)
     {"format_id": "h264-1", "acodec": "aac", "vcodec": "h264"},
     {"format_id": "h265", "acodec": "none", "vcodec": "h265"}]}))
 
-if mode == "corrupt":
+if mode == "corrupt" or (mode == "mirrorbad" and fmt == "h264-1"):
     path.write_bytes(b"this is not a video\n" * 100)
     print(path)
     sys.exit(0)
 
 duration = float(query.get("dur", os.environ.get("FAKE_DURATION", "4")))
 short = (mode == "alwaysshort" or (mode == "truncated" and fmt != "b")
-         or (mode == "mirror" and fmt != "h264-0"))
+         or (mode in ("mirror", "mirrorbad") and fmt != "h264-0"))
 audio = 1.0 if short else duration
 cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y",
        "-f", "lavfi", "-i", f"color=c=black:s=64x64:d={duration}"]
-if mode != "silent":
+if mode != "silent" and not (mode == "mirrorsilent" and fmt != "h264-0"):
     cmd += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={audio}"]
 if ext == "webm":
     cmd += ["-c:v", "libvpx-vp9", "-deadline", "realtime", "-c:a", "libopus"]

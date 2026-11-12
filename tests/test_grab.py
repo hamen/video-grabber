@@ -91,6 +91,37 @@ class GrabTest(unittest.TestCase):
         formats = [a[a.index("-f") + 1] for a in self.ytdlp_calls() if "-f" in a]
         self.assertEqual(formats, ["b", "h264-1", "h264-0"])  # audio-only and video-only skipped
 
+    def test_silent_mirror_does_not_end_the_search_even_without_transcription(self):
+        r = self.run_grab("--no-transcribe", "https://example.com/v?mode=mirrorsilent")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # the first download was silent too: download-only keeps it, no search
+        self.assertEqual([a for a in self.ytdlp_calls() if "-f" in a], [])
+        r = self.run_grab("https://example.com/v?mode=mirrorsilent&id=v2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        formats = [a[a.index("-f") + 1] for a in self.ytdlp_calls() if "-f" in a]
+        self.assertEqual(formats, ["b", "h264-1", "h264-0"])
+
+    def test_unreadable_fallback_moves_on_to_the_next_format(self):
+        r = self.run_grab("https://example.com/v?mode=mirrorbad")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        formats = [a[a.index("-f") + 1] for a in self.ytdlp_calls() if "-f" in a]
+        self.assertEqual(formats, ["b", "h264-1", "h264-0"])
+
+    def test_combined_formats_survives_bad_info_and_caps_the_list(self):
+        import importlib.machinery, importlib.util
+        loader = importlib.machinery.SourceFileLoader("grab_mod", str(GRAB))
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("grab_mod", loader))
+        loader.exec_module(mod)
+        info = self.tmp / "info.json"
+        for bad in ["not json", "null", "[1, 2]", '{"formats": "x"}', '{"formats": [1, null]}']:
+            info.write_text(bad)
+            self.assertEqual(mod.combined_formats(info), [], bad)
+        self.assertEqual(mod.combined_formats(self.tmp / "missing.json"), [])
+        fmts = [{"format_id": f"f{i}", "acodec": "aac", "vcodec": "h264"} for i in range(9)]
+        fmts.append({"format_id": "a+b", "acodec": "aac", "vcodec": "h264"})
+        info.write_text(json.dumps({"formats": fmts}))
+        self.assertEqual(mod.combined_formats(info), ["f8", "f7", "f6", "f5"])
+
     def test_audio_still_short_after_retry_fails_the_url(self):
         r = self.run_grab("https://example.com/v?mode=alwaysshort")
         self.assertEqual(r.returncode, 1)

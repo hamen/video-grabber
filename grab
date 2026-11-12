@@ -154,12 +154,16 @@ def combined_formats(info_path):
     mirror (TikTok did, for an 11-minute video): then the other copies are worth a try."""
     try:
         formats = json.loads(Path(info_path).read_text()).get("formats") or []
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         return []
-    has = lambda f, k: f.get(k) not in (None, "none")
+    if not isinstance(formats, list):
+        return []
+    has = lambda f, k: f.get(k) not in (None, "", "none")
+    # yt-dlp lists formats worst first. An id with / or + would read as a selector.
     ids = [f["format_id"] for f in reversed(formats)
-           if f.get("format_id") and has(f, "acodec") and has(f, "vcodec")]
-    return ids[:MAX_FALLBACK_FORMATS]
+           if isinstance(f, dict) and isinstance(f.get("format_id"), str)
+           and not set(f["format_id"]) & set("/+") and has(f, "acodec") and has(f, "vcodec")]
+    return list(dict.fromkeys(ids))[:MAX_FALLBACK_FORMATS]
 
 
 def grab_one(url, args):
@@ -177,11 +181,15 @@ def grab_one(url, args):
         # Delete first: yt-dlp skips a download whose output file already exists.
         info = media.parent / "video.info.json"
         media.unlink(missing_ok=True)
-        good = lambda m, st: m and (st == "ok" or (st == "none" and not args.transcribe))
+        # Only full audio ends the search: a silent copy of a format that lists audio is the
+        # bad mirror this loop exists for, in a download-only run too.
         for fmt in ["b"] + combined_formats(info):
             media = download(url, args.output, args.cookies_from_browser, fmt=fmt)
-            status = audio_status(media) if media else "none"
-            if good(media, status):
+            try:
+                status = audio_status(media) if media else "none"
+            except (OSError, subprocess.CalledProcessError):
+                status = "unreadable"
+            if media and status == "ok":
                 break
             if media:
                 media.unlink(missing_ok=True)
