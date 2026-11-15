@@ -71,7 +71,8 @@ class Job:
         self._cancelled.set()
         self.kill_all()
 
-    def _check(self):
+    def check(self):
+        """Raise Stopped if the job passed its deadline or was cancelled."""
         if self.stopped():
             raise Stopped("timed out" if self.timed_out() else "cancelled")
 
@@ -92,7 +93,7 @@ class Job:
         """Run cmd to the end, or kill its process group when the job stops.
 
         Returns a CompletedProcess with bytes stdout (and stderr if captured)."""
-        self._check()
+        self.check()
         proc = subprocess.Popen(
             cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
@@ -108,7 +109,7 @@ class Job:
                     if self.stopped():
                         self._kill(proc)
                         proc.communicate()
-                        self._check()
+                        self.check()
         finally:
             # The direct child can exit while a grandchild still runs: kill the group.
             self._kill(proc)
@@ -118,7 +119,7 @@ class Job:
                 self._procs.discard(proc)
         # A cancel can kill the child just before communicate() returns: its exit status
         # then says nothing about the command.
-        self._check()
+        self.check()
         if check and proc.returncode != 0:
             raise subprocess.CalledProcessError(proc.returncode, cmd)
         return subprocess.CompletedProcess(cmd, proc.returncode, out, err)

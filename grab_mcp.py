@@ -116,9 +116,10 @@ def copy_cookies(jobdir):
     src = os.path.expanduser(src)
     dst = Path(jobdir) / "cookies.txt"
     try:
-        fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with open(src, "rb") as f, os.fdopen(fd, "wb") as out:
-            shutil.copyfileobj(f, out)
+        with open(src, "rb") as f:
+            fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as out:
+                shutil.copyfileobj(f, out)
     except OSError:
         log("cookie file not readable: going on without cookies")
         dst.unlink(missing_ok=True)
@@ -154,21 +155,34 @@ def download(url, jobdir, job, fmt, cookies):
     return media
 
 
+def full_audio(media, jobdir, job):
+    """True if the file has an audio track that covers the video, and also covers the
+    length in the info JSON (an audio-only file has no video length to compare with:
+    TikTok can serve a 2-second audio stub for an 11-minute video)."""
+    if grab_core.audio_status(media, job) != "ok":
+        return False
+    duration = metadata(jobdir)["duration_s"]
+    if not duration:
+        return True
+    return grab_core.decoded_audio_seconds(media, job) >= grab_core.MIN_AUDIO_RATIO * duration
+
+
 def media_with_audio(url, jobdir, job, cookies):
     """Download the audio first; if it is missing or cut, try formats with their own audio."""
     media = download(url, jobdir, job, "ba/b", cookies)
     try:
-        if grab_core.audio_status(media, job) == "ok":
+        if full_audio(media, jobdir, job):
             return media
     except (OSError, ValueError, grab_core.subprocess.CalledProcessError):
         pass
     info = Path(jobdir) / "media.info.json"
     fallbacks = list(dict.fromkeys(["b"] + grab_core.combined_formats(info)))[:MAX_FALLBACKS]
     for fmt in fallbacks:
+        job.check()
         media.unlink(missing_ok=True)  # yt-dlp skips a file that is already there
         try:
             media = download(url, jobdir, job, fmt, cookies)
-            if grab_core.audio_status(media, job) == "ok":
+            if full_audio(media, jobdir, job):
                 return media
         except Stopped:
             raise
@@ -214,6 +228,7 @@ def run_job(url, job, root):
     try:
         cookies = copy_cookies(jobdir)
         media = media_with_audio(url, jobdir, job, cookies)
+        job.check()
         check_space(jobdir)
         try:
             text = grab_core.transcribe(media, CHUNK_SECONDS, job, tmp_root=jobdir)
@@ -221,6 +236,7 @@ def run_job(url, job, root):
             raise
         except (GrabError, OSError, grab_core.subprocess.CalledProcessError):
             raise GrabError(TRANSCRIBE_FAILED) from None
+        job.check()
         if not text.strip():
             raise GrabError(EMPTY)
         return {**metadata(jobdir), "transcript": text}
@@ -237,6 +253,39 @@ mcp = MCPServer("grab")
 _lock = anyio.Lock()
 
 
+async def run_in_thread(url, job):
+    """run_job in a worker thread. On a cancel, kill the children and wait until the
+    worker has cleaned up, so the caller frees the lock only after the job dir is gone.
+    A worker that has not started yet when the cancel comes never starts."""
+    done = threading.Event()
+    gate = threading.Lock()
+    state = {"started": False, "abandoned": False}
+
+    def work():
+        with gate:
+            if state["abandoned"]:
+                return None
+            state["started"] = True
+        try:
+            return run_job(url, job, ROOT)
+        finally:
+            done.set()
+
+    try:
+        return await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
+    except anyio.get_cancelled_exc_class():
+        job.cancel()
+        with gate:
+            state["abandoned"] = True
+            started = state["started"]
+        if started:
+            with anyio.CancelScope(shield=True):
+                while not done.is_set():
+                    await anyio.sleep(0.05)
+        log("call cancelled")
+        raise
+
+
 @mcp.tool()
 async def grab_transcript(url: str) -> Transcript:
     """Download one TikTok, Instagram, YouTube or X video (https link, at most 20 minutes)
@@ -247,33 +296,17 @@ async def grab_transcript(url: str) -> Transcript:
         url = check_url(url)
     except GrabError as e:
         raise ToolError(str(e)) from None
+    acquired = False
     try:
-        with anyio.fail_after(BUSY_WAIT):
-            await _lock.acquire()
-    except TimeoutError:
-        raise ToolError(BUSY) from None
-    try:
-        job = grab_core.Job(TIMEOUT)
-        done = threading.Event()
-        started = time.monotonic()
-
-        def work():
-            try:
-                return run_job(url, job, ROOT)
-            finally:
-                done.set()
-
         try:
-            result = await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
-        except anyio.get_cancelled_exc_class():
-            # The client cancelled: kill the children and wait for the cleanup to finish,
-            # so the lock is released only after the job dir is gone.
-            job.cancel()
-            with anyio.CancelScope(shield=True):
-                while not done.is_set():
-                    await anyio.sleep(0.05)
-            log("call cancelled")
-            raise
+            with anyio.fail_after(BUSY_WAIT):
+                await _lock.acquire()
+                acquired = True
+        except TimeoutError:
+            raise ToolError(BUSY) from None
+        started = time.monotonic()
+        try:
+            result = await run_in_thread(url, grab_core.Job(TIMEOUT))
         except Stopped:
             log(f"call timed out after {time.monotonic() - started:.0f} s")
             raise ToolError(TIMED_OUT) from None
@@ -286,7 +319,8 @@ async def grab_transcript(url: str) -> Transcript:
         log(f"call done in {time.monotonic() - started:.0f} s")
         return result
     finally:
-        _lock.release()
+        if acquired:
+            _lock.release()
 
 
 if __name__ == "__main__":

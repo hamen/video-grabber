@@ -115,7 +115,9 @@ It is stricter than the CLI, because the caller is a model and not you at a term
 
 - **Sites:** an `https` link to TikTok, Instagram, YouTube or X (their subdomains and short
   links too). No other host, no IP address, no port, no user name in the URL. yt-dlp runs
-  with only the extractors for those sites, so a redirect to another site fails.
+  with only the extractors for those sites, so a link that leads to a page on another site
+  fails. This is a filter, not network isolation: the media URLs that an extractor finds are
+  not checked.
 - **Limits:** videos of at most 20 minutes with a known length, no live streams, at most
   300 MB per file, 10 minutes per call. One call runs at a time; a second call waits up to
   60 seconds, then gets "busy".

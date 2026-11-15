@@ -168,6 +168,19 @@ class RunJob(Base):
         self.assertEqual(result["transcript"], "block 4")
         self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()], ["ba/b", "b"])
 
+    def test_short_audio_only_file_falls_back(self):
+        # An audio-only file has no video length to compare with: the info JSON length counts.
+        result = self.run_job(TIKTOK + "?mode=audioshort")
+        self.assertEqual(result["transcript"], "block 4")
+        self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()], ["ba/b", "b"])
+
+    def test_job_dir_cap(self):
+        saved = grab_mcp.MAX_JOB_BYTES
+        grab_mcp.MAX_JOB_BYTES = 10
+        self.addCleanup(setattr, grab_mcp, "MAX_JOB_BYTES", saved)
+        self.assert_error(grab_mcp.TOO_LONG)
+        self.assertNotIn("stt ", self.log.read_text())
+
     def test_fallbacks_are_capped(self):
         self.assert_error(grab_mcp.NO_AUDIO, TIKTOK + "?mode=alwaysshort")
         self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()],
@@ -204,6 +217,7 @@ class RunJob(Base):
         self.assertEqual(used.name, "cookies.txt")
         self.assertEqual(used.parent.parent, self.root)
         self.assertIn("secret-cookie-line", self.log.read_text())
+        self.assertIn("cookies-mode 600", self.log.read_text())
         self.assertFalse(used.exists())
         self.assertTrue(cookie.exists(), "the source cookie file must stay")
         self.assertNotIn(str(used), json.dumps(result))
@@ -261,6 +275,31 @@ class Stopping(Base):
         self.assertEqual(self.job_dirs(), [])
         for pid in self.pids():
             self.assertFalse(alive(pid))
+
+
+class Cancel(Base):
+    def test_cancel_before_the_worker_starts_frees_the_lock(self):
+        import anyio
+        os.environ["GRAB_TMP"] = str(self.root)
+        saved = (grab_mcp.ROOT, grab_mcp.BUSY_WAIT)
+        grab_mcp.ROOT, grab_mcp.BUSY_WAIT = str(self.root), 1
+        self.addCleanup(lambda: (setattr(grab_mcp, "ROOT", saved[0]),
+                                 setattr(grab_mcp, "BUSY_WAIT", saved[1])))
+
+        async def scenario():
+            for _ in range(5):  # cancel right away, before the thread runs
+                async with anyio.create_task_group() as tg:
+                    tg.start_soon(grab_mcp.grab_transcript, TIKTOK + "?mode=hang")
+                    await anyio.sleep(0)
+                    tg.cancel_scope.cancel()
+            with anyio.fail_after(30):
+                return await grab_mcp.grab_transcript(TIKTOK)
+
+        result = anyio.run(scenario)
+        self.assertEqual(result["transcript"], "block 4")
+        for pid in self.pids():
+            self.assertFalse(alive(pid))
+        self.assertEqual(self.job_dirs(), [])
 
 
 class Protocol(Base):
@@ -322,7 +361,9 @@ class Protocol(Base):
         return msg["result"]["content"][0]["text"]
 
     def test_list_and_call(self):
-        self.start()
+        cookie = self.tmp / "cookies.txt"
+        cookie.write_text("secret-cookie-line\n")
+        self.start(GRAB_COOKIE_FILE=str(cookie))
         self.send({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tools = self.reply(1)["result"]["tools"]
         self.assertEqual([t["name"] for t in tools], ["grab_transcript"])
@@ -338,6 +379,8 @@ class Protocol(Base):
         self.assertIn(grab_mcp.URL_NOT_ALLOWED, self.text(res))
         self.stop()
         self.assertNotIn(str(self.root), self.stderr)
+        self.assertNotIn("cookies.txt", self.stderr)
+        self.assertNotIn("secret-cookie-line", self.stderr)
         self.assertEqual(self.job_dirs(), [])
 
     def test_second_call_is_busy_then_the_lock_is_free(self):
