@@ -174,6 +174,13 @@ class RunJob(Base):
         self.assertEqual(result["transcript"], "block 4")
         self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()], ["ba/b", "b"])
 
+    def test_file_size_cap_without_a_known_size(self):
+        saved = grab_mcp.MAX_FILE_BYTES
+        grab_mcp.MAX_FILE_BYTES = 10
+        self.addCleanup(setattr, grab_mcp, "MAX_FILE_BYTES", saved)
+        self.assert_error(grab_mcp.TOO_LONG)
+        self.assertNotIn("stt ", self.log.read_text())
+
     def test_job_dir_cap(self):
         saved = grab_mcp.MAX_JOB_BYTES
         grab_mcp.MAX_JOB_BYTES = 10

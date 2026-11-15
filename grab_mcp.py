@@ -48,6 +48,9 @@ EXTRACTORS = r"tiktok,vm\.tiktok,instagram,youtube,youtubeytbe,twitter"
 MAX_DURATION = 1200
 MATCH_FILTER = f"duration & duration <= {MAX_DURATION} & !is_live"
 MAX_FILESIZE = "300M"
+# yt-dlp skips --max-filesize when the size is not known in advance (fragmented formats):
+# the file itself is checked too.
+MAX_FILE_BYTES = 300 * 1024 * 1024
 MAX_URL_LENGTH = 2048
 MAX_JOB_BYTES = 1 << 30
 MAX_FALLBACKS = 3
@@ -152,6 +155,8 @@ def download(url, jobdir, job, fmt, cookies):
     media = Path(lines[-1]).resolve()
     if media.parent != Path(jobdir).resolve() or not media.is_file():
         raise GrabError(DOWNLOAD_FAILED)
+    if media.stat().st_size > MAX_FILE_BYTES:
+        raise GrabError(TOO_LONG)
     return media
 
 
