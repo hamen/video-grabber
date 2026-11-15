@@ -134,15 +134,21 @@ def seconds(value):
     return d if d > 0 else None
 
 
-def decoded_audio_seconds(path, job=None):
+def time_cap(max_seconds):
+    """ffmpeg output options that stop decoding after max_seconds (none if None)."""
+    return [] if max_seconds is None else ["-t", str(max_seconds)]
+
+
+def decoded_audio_seconds(path, job=None, max_seconds=None):
     """Length of the first audio track, measured by decoding it.
 
     Stream durations in the container cannot be trusted: WebM often has none, and
     the container duration covers the video too, so a short track would look fine.
-    Decoding 11 minutes of audio takes about a second."""
+    Decoding 11 minutes of audio takes about a second. With max_seconds, decoding
+    stops there, so a file that lies about its length cannot fill the memory."""
     rate = 8000
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:a:0",
-           "-ac", "1", "-ar", str(rate), "-f", "s16le", "-"]
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), *time_cap(max_seconds),
+           "-map", "0:a:0", "-ac", "1", "-ar", str(rate), "-f", "s16le", "-"]
     if job:
         return len(job.run(cmd).stdout) / (2 * rate)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
@@ -156,7 +162,7 @@ def decoded_audio_seconds(path, job=None):
     return total / (2 * rate)
 
 
-def audio_status(path, job=None):
+def audio_status(path, job=None, max_seconds=None):
     """"ok", "short" (under MIN_AUDIO_RATIO of the video) or "none" (no audio stream)."""
     cmd = ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
            "-show_entries", "format=duration", "-of", "json", str(path)]
@@ -174,17 +180,20 @@ def audio_status(path, job=None):
         video = seconds(data.get("format", {}).get("duration"))
     if video is None:  # audio-only download, or no length to compare with
         return "ok"
-    return "ok" if decoded_audio_seconds(path, job) >= MIN_AUDIO_RATIO * video else "short"
+    return ("ok" if decoded_audio_seconds(path, job, max_seconds) >= MIN_AUDIO_RATIO * video
+            else "short")
 
 
-def transcribe(media, chunk_seconds, job=None, tmp_root=None):
+def transcribe(media, chunk_seconds, job=None, tmp_root=None, max_seconds=None):
     """Cut the audio into chunk_seconds blocks and run the STT command on each one.
 
     Many local models have a maximum input length (Nemotron streaming stops near 6.5
     minutes), so long videos must go in blocks. A cut can split a word in two.
-    The blocks go to a temporary directory under tmp_root (default: the system temp)."""
+    The blocks go to a temporary directory under tmp_root (default: the system temp).
+    With max_seconds, only that much audio is cut, so the blocks cannot fill the disk."""
     with tempfile.TemporaryDirectory(prefix="grab-", dir=tmp_root) as tmp:
-        cut = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(media), "-vn",
+        cut = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(media),
+               *time_cap(max_seconds), "-vn",
                "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "segment",
                "-segment_time", str(chunk_seconds), f"{tmp}/chunk%04d.wav"]
         if job:

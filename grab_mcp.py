@@ -46,6 +46,7 @@ ALLOWED_DOMAINS = ("tiktok.com", "instagram.com", "instagr.am", "youtube.com", "
 # off, so a redirect to any other site fails instead of downloading.
 EXTRACTORS = r"tiktok,vm\.tiktok,instagram,youtube,youtubeytbe,twitter"
 MAX_DURATION = 1200
+DECODE_CAP = MAX_DURATION + 60  # ffmpeg stops here, even if the file lies about its length
 MATCH_FILTER = f"duration & duration <= {MAX_DURATION} & !is_live"
 MAX_FILESIZE = "300M"
 # yt-dlp skips --max-filesize when the size is not known in advance (fragmented formats):
@@ -164,12 +165,13 @@ def full_audio(media, jobdir, job):
     """True if the file has an audio track that covers the video, and also covers the
     length in the info JSON (an audio-only file has no video length to compare with:
     TikTok can serve a 2-second audio stub for an 11-minute video)."""
-    if grab_core.audio_status(media, job) != "ok":
+    if grab_core.audio_status(media, job, DECODE_CAP) != "ok":
         return False
     duration = metadata(jobdir)["duration_s"]
     if not duration:
         return True
-    return grab_core.decoded_audio_seconds(media, job) >= grab_core.MIN_AUDIO_RATIO * duration
+    return (grab_core.decoded_audio_seconds(media, job, DECODE_CAP)
+            >= grab_core.MIN_AUDIO_RATIO * duration)
 
 
 def media_with_audio(url, jobdir, job, cookies):
@@ -225,6 +227,19 @@ def metadata(jobdir):
     }
 
 
+def sweep_stale_jobs(root):
+    """Remove job dirs that a killed server left behind (they can hold a cookie copy).
+    Call it once at startup, before the first call: the server runs one job at a time,
+    so no job dir under root belongs to a live call then."""
+    root = Path(root)
+    if not root.is_dir():
+        return 0
+    stale = [d for d in root.glob("job-*") if d.is_dir() and not d.is_symlink()]
+    for d in stale:
+        shutil.rmtree(d, ignore_errors=True)
+    return len(stale)
+
+
 def run_job(url, job, root):
     """The whole call, blocking: download, audio check, transcription, cleanup."""
     root = Path(root)
@@ -236,7 +251,8 @@ def run_job(url, job, root):
         job.check()
         check_space(jobdir)
         try:
-            text = grab_core.transcribe(media, CHUNK_SECONDS, job, tmp_root=jobdir)
+            text = grab_core.transcribe(media, CHUNK_SECONDS, job, tmp_root=jobdir,
+                                           max_seconds=DECODE_CAP)
         except Stopped:
             raise
         except (GrabError, OSError, grab_core.subprocess.CalledProcessError):
@@ -329,4 +345,6 @@ async def grab_transcript(url: str) -> Transcript:
 
 
 if __name__ == "__main__":
+    if swept := sweep_stale_jobs(ROOT):
+        log(f"removed {swept} job dir(s) left by an earlier run")
     mcp.run()

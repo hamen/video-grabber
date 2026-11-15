@@ -243,6 +243,49 @@ class RunJob(Base):
         self.assertNotIn("--cookies", self.ytdlp_calls()[0])
 
 
+    def test_every_ffmpeg_call_is_capped(self):
+        calls = []
+        real = grab_core.Job.run
+
+        def spy(job, cmd, *a, **kw):
+            calls.append(list(cmd))
+            return real(job, cmd, *a, **kw)
+
+        grab_core.Job.run = spy
+        self.addCleanup(setattr, grab_core.Job, "run", real)
+        self.run_job()
+        ffmpeg = [c for c in calls if c[0] == "ffmpeg"]
+        self.assertGreaterEqual(len(ffmpeg), 2)  # the audio length check and the cut
+        for cmd in ffmpeg:
+            i = cmd.index("-t")
+            self.assertEqual(cmd[i + 1], str(grab_mcp.DECODE_CAP))
+            self.assertGreater(i, cmd.index("-i"), "-t must be an output option")
+
+    def test_decode_cap_stops_ffmpeg(self):
+        wav = self.tmp / "tone.wav"
+        subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi",
+                        "-i", "sine=duration=5", str(wav)], check=True)
+        self.assertAlmostEqual(grab_core.decoded_audio_seconds(wav, grab_core.Job(30)), 5, delta=0.1)
+        self.assertAlmostEqual(grab_core.decoded_audio_seconds(wav, grab_core.Job(30), 2), 2,
+                               delta=0.1)
+
+    def test_sweep_removes_only_stale_job_dirs(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        stale = self.root / "job-abc123"
+        stale.mkdir()
+        (stale / "cookies.txt").write_text("secret-cookie-line\n")
+        other = self.root / "keep-me"
+        other.mkdir()
+        target = self.tmp / "outside"
+        target.mkdir()
+        (self.root / "job-link").symlink_to(target)
+        self.assertEqual(grab_mcp.sweep_stale_jobs(self.root), 1)
+        self.assertFalse(stale.exists())
+        self.assertTrue(other.exists())
+        self.assertTrue(target.exists(), "a symlink must not be followed")
+        self.assertEqual(grab_mcp.sweep_stale_jobs(self.tmp / "missing"), 0)
+
+
 class Stopping(Base):
     def test_download_timeout_kills_the_process_group_and_cleans_up(self):
         cookie = self.tmp / "cookies.txt"
@@ -366,6 +409,13 @@ class Protocol(Base):
 
     def text(self, msg):
         return msg["result"]["content"][0]["text"]
+
+    def test_startup_removes_a_job_dir_left_by_a_killed_server(self):
+        stale = self.root / "job-left"
+        stale.mkdir(parents=True)
+        (stale / "cookies.txt").write_text("secret-cookie-line\n")
+        self.start()
+        self.assertFalse(stale.exists())
 
     def test_list_and_call(self):
         cookie = self.tmp / "cookies.txt"
