@@ -19,6 +19,7 @@ Environment:
   GRAB_TIMEOUT      seconds per call (default: 600)
   GRAB_BUSY_WAIT    seconds a call waits for the one running before it says "busy" (default: 60)
 """
+import fcntl
 import ipaddress
 import json
 import os
@@ -227,17 +228,39 @@ def metadata(jobdir):
     }
 
 
+def lock_root(root):
+    """Take an exclusive lock on root/.lock and keep it for the life of the process.
+    Returns the lock fd, or None if another server process holds it."""
+    root = Path(root)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def sweep_stale_jobs(root):
     """Remove job dirs that a killed server left behind (they can hold a cookie copy).
-    Call it once at startup, before the first call: the server runs one job at a time,
-    so no job dir under root belongs to a live call then."""
+    Call it only while holding lock_root(root), before the first call: this process
+    runs one job at a time, so no job dir under root belongs to a live call then.
+    Returns (removed, failed)."""
     root = Path(root)
+    removed = failed = 0
     if not root.is_dir():
-        return 0
-    stale = [d for d in root.glob("job-*") if d.is_dir() and not d.is_symlink()]
-    for d in stale:
-        shutil.rmtree(d, ignore_errors=True)
-    return len(stale)
+        return removed, failed
+    for d in root.glob("job-*"):
+        if not d.is_dir() or d.is_symlink():
+            continue
+        try:
+            shutil.rmtree(d)
+            removed += 1
+        except OSError as e:
+            log(f"cannot remove a stale job dir ({type(e).__name__})")
+            failed += 1
+    return removed, failed
 
 
 def run_job(url, job, root):
@@ -252,7 +275,7 @@ def run_job(url, job, root):
         check_space(jobdir)
         try:
             text = grab_core.transcribe(media, CHUNK_SECONDS, job, tmp_root=jobdir,
-                                           max_seconds=DECODE_CAP)
+                                        max_seconds=DECODE_CAP)
         except Stopped:
             raise
         except (GrabError, OSError, grab_core.subprocess.CalledProcessError):
@@ -345,6 +368,11 @@ async def grab_transcript(url: str) -> Transcript:
 
 
 if __name__ == "__main__":
-    if swept := sweep_stale_jobs(ROOT):
-        log(f"removed {swept} job dir(s) left by an earlier run")
+    _root_lock = lock_root(ROOT)
+    if _root_lock is None:
+        log("another server holds the GRAB_TMP lock: stale job dirs not swept")
+    else:
+        removed, failed = sweep_stale_jobs(ROOT)
+        if removed or failed:
+            log(f"stale job dirs: {removed} removed, {failed} not removed")
     mcp.run()

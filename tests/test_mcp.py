@@ -78,7 +78,7 @@ class Base(unittest.TestCase):
         self.fail("the fake never started")
 
     def job_dirs(self):
-        return list(self.root.iterdir()) if self.root.exists() else []
+        return list(self.root.glob("job-*")) if self.root.exists() else []
 
     def run_job(self, url=TIKTOK, timeout=60):
         return grab_mcp.run_job(url, grab_core.Job(timeout), self.root)
@@ -278,12 +278,44 @@ class RunJob(Base):
         other.mkdir()
         target = self.tmp / "outside"
         target.mkdir()
+        (target / "inside.txt").write_text("keep\n")
         (self.root / "job-link").symlink_to(target)
-        self.assertEqual(grab_mcp.sweep_stale_jobs(self.root), 1)
+        (self.root / "job-file").write_text("not a dir\n")
+        self.assertEqual(grab_mcp.sweep_stale_jobs(self.root), (1, 0))
         self.assertFalse(stale.exists())
         self.assertTrue(other.exists())
-        self.assertTrue(target.exists(), "a symlink must not be followed")
-        self.assertEqual(grab_mcp.sweep_stale_jobs(self.tmp / "missing"), 0)
+        self.assertTrue((self.root / "job-link").is_symlink())
+        self.assertTrue((target / "inside.txt").exists(), "a symlink must not be followed")
+        self.assertTrue((self.root / "job-file").exists())
+        self.assertEqual(grab_mcp.sweep_stale_jobs(self.tmp / "missing"), (0, 0))
+
+    def test_sweep_counts_a_dir_it_cannot_remove(self):
+        locked = self.root / "job-locked"
+        (locked / "sub").mkdir(parents=True)
+        (locked / "sub" / "cookies.txt").write_text("x\n")
+        (locked / "sub").chmod(0o500)
+        self.addCleanup((locked / "sub").chmod, 0o700)
+        if os.geteuid() == 0:
+            self.skipTest("root ignores directory permissions")
+        self.assertEqual(grab_mcp.sweep_stale_jobs(self.root), (0, 1))
+
+    def test_root_lock_is_exclusive(self):
+        fd = grab_mcp.lock_root(self.root)
+        self.assertIsNotNone(fd)
+        self.addCleanup(os.close, fd)
+        other = subprocess.run(
+            [sys.executable, "-c", "import sys, grab_mcp; "
+             "sys.exit(0 if grab_mcp.lock_root(sys.argv[1]) is None else 1)", str(self.root)],
+            cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT)})
+        self.assertEqual(other.returncode, 0, "a second process must not get the lock")
+
+    def test_transcribe_cut_stops_at_the_cap(self):
+        wav = self.tmp / "tone.wav"
+        subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi",
+                        "-i", "sine=duration=6", str(wav)], check=True)
+        text = grab_core.transcribe(wav, 1, grab_core.Job(60), tmp_root=self.tmp,
+                                    max_seconds=3)
+        self.assertEqual(len(text.splitlines()), 3, text)
 
 
 class Stopping(Base):
@@ -416,6 +448,14 @@ class Protocol(Base):
         (stale / "cookies.txt").write_text("secret-cookie-line\n")
         self.start()
         self.assertFalse(stale.exists())
+
+    def test_startup_does_not_sweep_while_another_server_holds_the_lock(self):
+        fd = grab_mcp.lock_root(self.root)
+        self.addCleanup(os.close, fd)
+        live = self.root / "job-live"
+        live.mkdir()
+        self.start()
+        self.assertTrue(live.exists(), "a live job dir of another server must stay")
 
     def test_list_and_call(self):
         cookie = self.tmp / "cookies.txt"
