@@ -449,12 +449,16 @@ class Protocol(Base):
         self.start()
         self.assertFalse(stale.exists())
 
-    def test_startup_does_not_sweep_while_another_server_holds_the_lock(self):
+    def test_second_server_refuses_to_start_and_sweeps_nothing(self):
         fd = grab_mcp.lock_root(self.root)
         self.addCleanup(os.close, fd)
         live = self.root / "job-live"
         live.mkdir()
-        self.start()
+        r = subprocess.run([sys.executable, str(ROOT / "grab_mcp.py")], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "GRAB_TMP": str(self.root)})
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("refusing to start", r.stderr)
         self.assertTrue(live.exists(), "a live job dir of another server must stay")
 
     def test_list_and_call(self):

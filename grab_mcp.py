@@ -368,11 +368,13 @@ async def grab_transcript(url: str) -> Transcript:
 
 
 if __name__ == "__main__":
+    # One server per GRAB_TMP. A second one that ran without the lock could later have its
+    # live job dir swept by a third server that gets the lock after the first one exits.
     _root_lock = lock_root(ROOT)
     if _root_lock is None:
-        log("another server holds the GRAB_TMP lock: stale job dirs not swept")
-    else:
-        removed, failed = sweep_stale_jobs(ROOT)
-        if removed or failed:
-            log(f"stale job dirs: {removed} removed, {failed} not removed")
+        log("another server holds the GRAB_TMP lock: refusing to start")
+        sys.exit(1)
+    removed, failed = sweep_stale_jobs(ROOT)
+    if removed or failed:
+        log(f"stale job dirs: {removed} removed, {failed} not removed")
     mcp.run()
