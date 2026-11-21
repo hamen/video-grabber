@@ -98,6 +98,51 @@ ln -s "$PWD/video-grabber/skills/grab" ~/.agents/skills/grab
 Link the directory, not the `SKILL.md` file: Codex skips a skill whose `SKILL.md` is a symlink.
 Agents that change the code read [`AGENTS.md`](AGENTS.md).
 
+## MCP mode
+
+`grab_mcp.py` serves `grab` as an [MCP](https://modelcontextprotocol.io) server over stdio,
+so an AI client can ask for a transcript. It has one tool:
+
+```
+grab_transcript(url) -> {title, uploader, duration_s, upload_date, webpage_url, description, transcript}
+```
+
+```bash
+uv run grab_mcp.py      # uv installs the mcp package that the script declares inline
+```
+
+It is stricter than the CLI, because the caller is a model and not you at a terminal:
+
+- **Sites:** an `https` link to TikTok, Instagram, YouTube or X (their subdomains and short
+  links too). No other host, no IP address, no port, no user name in the URL. yt-dlp runs
+  with only the extractors for those sites, so a link that leads to a page on another site
+  fails. This is a filter, not network isolation: the media URLs that an extractor finds are
+  not checked.
+- **Limits:** videos of at most 20 minutes with a known length, no live streams, at most
+  300 MB per file, 10 minutes per call. One call runs at a time; a second call waits up to
+  60 seconds, then gets "busy".
+- **Audio only:** it downloads the audio track first, and a full format only when that audio
+  is missing or cut. No video file is kept.
+- **Clean up:** each call works in a new private directory under `$GRAB_TMP`, deleted at the
+  end, also on a timeout or a cancel. A timeout or a cancel kills yt-dlp, ffmpeg and the STT
+  command, with their children.
+- **Errors:** short messages ("video needs a login", "too long", "transcript is empty", ...).
+  The result never holds yt-dlp, ffmpeg or STT output or a local path. An empty transcript is
+  an error.
+- **Cookies:** it never reads a browser. Set `GRAB_COOKIE_FILE` to a Netscape `cookies.txt`
+  (for example one that `yt-dlp --cookies-from-browser chrome --cookies FILE` wrote) and each
+  call uses a private copy of it. Keep only the cookies of the sites above in that file.
+
+Environment: `GRAB_TMP` (default: a `grab-mcp` directory in the system temp),
+`GRAB_COOKIE_FILE`, `GRAB_STT_CMD`, `GRAB_YTDLP`, `GRAB_TIMEOUT` (seconds, default 600),
+`GRAB_BUSY_WAIT` (seconds, default 60).
+
+To reach it from a remote client, put an HTTP bridge such as
+[mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) in front of it, bound to localhost, and
+an authentication layer in front of that. Anyone who can call the tool makes your machine
+download from those sites, with your cookies if you set a cookie file. mcp-proxy does not pass
+its own environment to the server: give every variable above, and `PATH`, with `--env`.
+
 ## Develop
 
 ```bash
@@ -106,7 +151,8 @@ bin/ci                                 # syntax, leak scan, tests
 ```
 
 The tests use fake yt-dlp and STT commands in `tests/fakes/` and never touch the network. They
-need `ffmpeg`, because they make real media files.
+need `ffmpeg`, because they make real media files, and `uv`, which brings the `mcp` package for
+the MCP tests.
 
 ## License
 
