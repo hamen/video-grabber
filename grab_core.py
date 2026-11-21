@@ -89,9 +89,11 @@ class Job:
         for proc in procs:
             self._kill(proc)
 
-    def run(self, cmd, check=False, capture_stderr=False):
+    def run(self, cmd, check=False, capture_stderr=False, watch=None):
         """Run cmd to the end, or kill its process group when the job stops.
 
+        watch, if given, is called about every 0.2 s while cmd runs; an exception from it
+        kills the process group and propagates.
         Returns a CompletedProcess with bytes stdout (and stderr if captured)."""
         self.check()
         proc = subprocess.Popen(
@@ -110,11 +112,16 @@ class Job:
                         self._kill(proc)
                         proc.communicate()
                         self.check()
+                    if watch is not None:
+                        watch()
         finally:
             # The direct child can exit while a grandchild still runs: kill the group.
             self._kill(proc)
             if proc.poll() is None:
                 proc.wait()
+            for pipe in (proc.stdout, proc.stderr):  # still open if watch() raised
+                if pipe is not None:
+                    pipe.close()
             with self._lock:
                 self._procs.discard(proc)
         # A cancel can kill the child just before communicate() returns: its exit status

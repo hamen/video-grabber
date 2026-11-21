@@ -25,6 +25,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -41,7 +42,8 @@ sys.path.insert(0, str(Path(os.path.realpath(__file__)).parent))
 import grab_core  # noqa: E402
 from grab_core import GrabError, Stopped  # noqa: E402
 
-ALLOWED_DOMAINS = ("tiktok.com", "instagram.com", "instagr.am", "youtube.com", "youtu.be",
+# No instagr.am: yt-dlp has no extractor for it (checked with 2026.10.26).
+ALLOWED_DOMAINS = ("tiktok.com", "instagram.com", "youtube.com", "youtu.be",
                    "x.com", "twitter.com")
 # yt-dlp extractor names (full-match regexes) for those sites. The generic extractor is
 # off, so a redirect to any other site fails instead of downloading.
@@ -51,7 +53,7 @@ DECODE_CAP = MAX_DURATION + 60  # ffmpeg stops here, even if the file lies about
 MATCH_FILTER = f"duration & duration <= {MAX_DURATION} & !is_live"
 MAX_FILESIZE = "300M"
 # yt-dlp skips --max-filesize when the size is not known in advance (fragmented formats):
-# the file itself is checked too.
+# the file is also watched while it downloads, and checked after.
 MAX_FILE_BYTES = 300 * 1024 * 1024
 MAX_URL_LENGTH = 2048
 MAX_JOB_BYTES = 1 << 30
@@ -135,7 +137,11 @@ def copy_cookies(jobdir):
 def ytdlp_argv(url, jobdir, fmt, cookies):
     cmd = grab_core.ytdlp_cmd() + [
         "--ignore-config", "--quiet", "--no-warnings", "--no-progress", "--no-simulate",
-        "--no-playlist", "--use-extractors", EXTRACTORS, "--match-filters", MATCH_FILTER,
+        # A post with several videos (Instagram carousel, X) is a playlist even with
+        # --no-playlist: take the first entry only, and no playlist info JSON, so one
+        # media file and one media.info.json describe the same video.
+        "--no-playlist", "--playlist-items", "1", "--no-write-playlist-metafiles",
+        "--use-extractors", EXTRACTORS, "--match-filters", MATCH_FILTER,
         "--max-filesize", MAX_FILESIZE, "-f", fmt, "--write-info-json",
         "-o", f"{jobdir}/media.%(ext)s", "--print", "after_move:filepath",
     ]
@@ -144,10 +150,22 @@ def ytdlp_argv(url, jobdir, fmt, cookies):
     return cmd + ["--", url]
 
 
+def media_bytes(jobdir):
+    """Bytes of the media file(s) in jobdir, partial downloads included."""
+    return sum(p.stat().st_size for p in Path(jobdir).glob("media*")
+               if p.is_file() and not p.name.endswith(".info.json"))
+
+
+def watch_media(jobdir):
+    if media_bytes(jobdir) > MAX_FILE_BYTES:
+        raise GrabError(TOO_LONG)
+
+
 def download(url, jobdir, job, fmt, cookies):
     """Path of the downloaded file inside jobdir, or GrabError with a short message."""
     check_space(jobdir)
-    res = job.run(ytdlp_argv(url, jobdir, fmt, cookies), capture_stderr=True)
+    res = job.run(ytdlp_argv(url, jobdir, fmt, cookies), capture_stderr=True,
+                  watch=lambda: watch_media(jobdir))
     if res.returncode != 0:
         err = res.stderr.decode("utf-8", "replace")
         raise GrabError(NEEDS_LOGIN if LOGIN_HINT.search(err) else DOWNLOAD_FAILED)
@@ -230,9 +248,15 @@ def metadata(jobdir):
 
 def lock_root(root):
     """Take an exclusive lock on root/.lock and keep it for the life of the process.
-    Returns the lock fd, or None if another server process holds it."""
+    Returns the lock fd, or None if another server process holds it. Raises ValueError
+    if root is a symlink or belongs to another user: the startup sweep must not delete
+    job-* dirs in a directory that someone else chose."""
     root = Path(root)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    st = os.lstat(root)
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise ValueError("GRAB_TMP must be a directory of this user, not a symlink")
+    os.chmod(root, 0o700)
     fd = os.open(root / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -370,7 +394,11 @@ async def grab_transcript(url: str) -> Transcript:
 if __name__ == "__main__":
     # One server per GRAB_TMP. A second one that ran without the lock could later have its
     # live job dir swept by a third server that gets the lock after the first one exits.
-    _root_lock = lock_root(ROOT)
+    try:
+        _root_lock = lock_root(ROOT)
+    except ValueError as e:
+        log(f"{e}: refusing to start")
+        sys.exit(1)
     if _root_lock is None:
         log("another server holds the GRAB_TMP lock: refusing to start")
         sys.exit(1)

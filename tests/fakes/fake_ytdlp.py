@@ -25,6 +25,8 @@ MODE:
   error        exit 1 with an error that is not about a login
   skip         exit 0 with no output (a video that --match-filters rejects)
   hang         log "pid <own pid> <child pid>", start a child that sleeps, sleep
+  grow         log "pid <own pid>", then grow media.<ext>.part without end (a fragmented
+               download whose size yt-dlp does not know)
   audioshort   with "-f ba/b", an audio-only M4A 1 second long (the info JSON says the
                full length); any other format is complete
 """
@@ -61,6 +63,16 @@ if mode == "hang":
     time.sleep(600)
 
 template = argv[argv.index("-o") + 1]
+if mode == "grow":
+    with open(os.environ["FAKE_LOG"], "a") as f:
+        f.write(f"pid {os.getpid()}\n")
+    part = Path(template.replace("%(ext)s", "mp4") + ".part")
+    with open(part, "wb") as f:
+        for _ in range(1200):
+            f.write(b"x" * 65536)
+            f.flush()
+            time.sleep(0.05)
+    sys.exit(0)
 fmt = argv[argv.index("-f") + 1] if "-f" in argv else None
 audio_only = mode == "audioshort" and fmt == "ba/b"
 ext = "m4a" if audio_only else query.get("ext", "mp4")

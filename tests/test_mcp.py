@@ -94,7 +94,7 @@ class Base(unittest.TestCase):
 class UrlRules(unittest.TestCase):
     def test_allowed_hosts_and_short_links(self):
         for url in [TIKTOK, "https://vm.tiktok.com/ZMabc123/", "https://vt.tiktok.com/x/",
-                    "https://www.instagram.com/reel/abc/", "https://instagr.am/p/abc/",
+                    "https://www.instagram.com/reel/abc/",
                     "https://www.youtube.com/watch?v=abc", "https://youtu.be/abc?t=3",
                     "https://m.youtube.com/shorts/abc", "https://x.com/u/status/1",
                     "https://twitter.com/u/status/1", "https://WWW.TikTok.COM/@a/video/1"]:
@@ -110,7 +110,8 @@ class UrlRules(unittest.TestCase):
                "https://eviltiktok.com/x", "https://youtube.com.", "-https://youtu.be/x",
                "--exec=whoami", "https://youtu.be/" + "a" * 2048, "", "ftp://youtube.com/x",
                "https://youtu.be/a b", "https://youtu.be/a\nb", "https:\\\\youtu.be\\x",
-               "https://2130706433/x", "file:///etc/passwd", None]
+               "https://2130706433/x", "file:///etc/passwd", "https://instagr.am/p/abc/",
+               None]
         for url in bad:
             with self.assertRaises(grab_core.GrabError, msg=repr(url)) as cm:
                 grab_mcp.check_url(url)
@@ -122,8 +123,10 @@ class YtdlpArgv(Base):
         argv = grab_mcp.ytdlp_argv(TIKTOK, "/jobs/job-1", "ba/b", None)
         self.assertEqual(argv[-2:], ["--", TIKTOK])
         joined = " ".join(argv)
-        for flag in ["--ignore-config", "--no-playlist", "--write-info-json"]:
+        for flag in ["--ignore-config", "--no-playlist", "--write-info-json",
+                     "--no-write-playlist-metafiles"]:
             self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--playlist-items") + 1], "1")
         self.assertEqual(argv[argv.index("--use-extractors") + 1], grab_mcp.EXTRACTORS)
         self.assertNotIn("generic", grab_mcp.EXTRACTORS)
         self.assertEqual(argv[argv.index("--match-filters") + 1],
@@ -298,6 +301,40 @@ class RunJob(Base):
         if os.geteuid() == 0:
             self.skipTest("root ignores directory permissions")
         self.assertEqual(grab_mcp.sweep_stale_jobs(self.root), (0, 1))
+
+    def test_symlinked_root_is_refused_and_not_swept(self):
+        target = self.tmp / "elsewhere"
+        (target / "job-keep").mkdir(parents=True)
+        link = self.tmp / "linked-root"
+        link.symlink_to(target)
+        with self.assertRaises(ValueError):
+            grab_mcp.lock_root(link)
+        self.assertTrue((target / "job-keep").is_dir())
+        self.assertFalse((target / ".lock").exists())
+
+    def test_growing_download_is_killed_at_the_size_cap(self):
+        saved = grab_mcp.MAX_FILE_BYTES
+        grab_mcp.MAX_FILE_BYTES = 1 << 20
+        self.addCleanup(setattr, grab_mcp, "MAX_FILE_BYTES", saved)
+        started = time.monotonic()
+        self.assert_error(grab_mcp.TOO_LONG, TIKTOK + "?mode=grow")
+        self.assertLess(time.monotonic() - started, 20)
+        for pid in self.pids():
+            self.assertFalse(alive(pid))
+
+    def test_unexpected_error_is_internal_without_its_message(self):
+        import anyio
+        from mcp.server.mcpserver.exceptions import ToolError
+        saved = (grab_mcp.run_job, grab_mcp.ROOT)
+
+        def boom(url, job, root):
+            raise RuntimeError("/srv/secret/path")
+        grab_mcp.run_job, grab_mcp.ROOT = boom, str(self.root)
+        self.addCleanup(lambda: (setattr(grab_mcp, "run_job", saved[0]),
+                                 setattr(grab_mcp, "ROOT", saved[1])))
+        with self.assertRaises(ToolError) as cm:
+            anyio.run(grab_mcp.grab_transcript, TIKTOK)
+        self.assertEqual(str(cm.exception), grab_mcp.INTERNAL)
 
     def test_root_lock_is_exclusive(self):
         fd = grab_mcp.lock_root(self.root)
