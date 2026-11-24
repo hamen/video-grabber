@@ -61,6 +61,8 @@ MAX_FALLBACKS = 3
 # Best audio-only format first (smaller download), but never TikTok's "audio" format:
 # since yt-dlp 2026.11 it is the post's music track (music.playUrl), not the sound of
 # the video, so a voice-over video came back as an instrumental song with no words.
+# The filter applies to every site; of the allowed extractors only TikTok uses that id,
+# and "/b" still gets a format with its own audio.
 AUDIO_FIRST = "ba[format_id!=audio]/b"
 CHUNK_SECONDS = 300
 

@@ -78,7 +78,11 @@ if mode == "grow":
     sys.exit(0)
 fmt = argv[argv.index("-f") + 1] if "-f" in argv else None
 audio_only = mode == "audioshort" and (fmt or "").startswith("ba")
-music = mode == "music" and (fmt or "").split("/")[0] == "ba"
+# The only audio-only format is "audio" (TikTok's music track): the first selector gets
+# it unless it carries the filter that excludes it, and then yt-dlp goes on to "b".
+first = (fmt or "").split("/")[0]
+music = (mode == "music" and first.startswith("ba")
+         and "[format_id!=audio]" not in first)
 ext = "m4a" if audio_only or music else query.get("ext", "mp4")
 duration = float(query.get("dur", os.environ.get("FAKE_DURATION", "4")))
 path = Path(template.replace("%(uploader)s", "tester")
