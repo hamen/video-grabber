@@ -120,7 +120,7 @@ class UrlRules(unittest.TestCase):
 
 class YtdlpArgv(Base):
     def test_flags_and_separator(self):
-        argv = grab_mcp.ytdlp_argv(TIKTOK, "/jobs/job-1", "ba/b", None)
+        argv = grab_mcp.ytdlp_argv(TIKTOK, "/jobs/job-1", grab_mcp.AUDIO_FIRST, None)
         self.assertEqual(argv[-2:], ["--", TIKTOK])
         joined = " ".join(argv)
         for flag in ["--ignore-config", "--no-playlist", "--write-info-json",
@@ -132,7 +132,7 @@ class YtdlpArgv(Base):
         self.assertEqual(argv[argv.index("--match-filters") + 1],
                          "duration & duration <= 1200 & !is_live")
         self.assertEqual(argv[argv.index("--max-filesize") + 1], "300M")
-        self.assertEqual(argv[argv.index("-f") + 1], "ba/b")
+        self.assertEqual(argv[argv.index("-f") + 1], "ba[format_id!=audio]/b")
         self.assertEqual(argv[argv.index("-o") + 1], "/jobs/job-1/media.%(ext)s")
         self.assertNotIn("--cookies", argv)
         self.assertNotIn("cookies-from-browser", joined)
@@ -169,13 +169,30 @@ class RunJob(Base):
     def test_cut_audio_falls_back_to_a_format_with_its_own_audio(self):
         result = self.run_job(TIKTOK + "?mode=truncated")
         self.assertEqual(result["transcript"], "block 4")
-        self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()], ["ba/b", "b"])
+        self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()], [grab_mcp.AUDIO_FIRST, "b"])
 
     def test_short_audio_only_file_falls_back(self):
         # An audio-only file has no video length to compare with: the info JSON length counts.
         result = self.run_job(TIKTOK + "?mode=audioshort")
         self.assertEqual(result["transcript"], "block 4")
-        self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()], ["ba/b", "b"])
+        self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()], [grab_mcp.AUDIO_FIRST, "b"])
+
+    def test_tiktok_music_track_is_not_taken_as_the_audio(self):
+        # yt-dlp 2026.11 lists TikTok's music track as format "audio": a voice-over came
+        # back as the song. The first selector must skip it and get the video's own sound.
+        media = []
+        real = grab_core.transcribe
+
+        def spy(path, *a, **kw):
+            media.append(Path(path).suffix)
+            return real(path, *a, **kw)
+        grab_core.transcribe = spy
+        self.addCleanup(setattr, grab_core, "transcribe", real)
+        result = self.run_job(TIKTOK + "?mode=music")
+        self.assertEqual(result["transcript"], "block 4")
+        self.assertEqual(media, [".mp4"])
+        self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()],
+                         [grab_mcp.AUDIO_FIRST])
 
     def test_file_size_cap_without_a_known_size(self):
         saved = grab_mcp.MAX_FILE_BYTES
@@ -194,7 +211,7 @@ class RunJob(Base):
     def test_fallbacks_are_capped(self):
         self.assert_error(grab_mcp.NO_AUDIO, TIKTOK + "?mode=alwaysshort")
         self.assertEqual([c[c.index("-f") + 1] for c in self.ytdlp_calls()],
-                         ["ba/b", "b", "h264-1", "h264-0"][:1 + grab_mcp.MAX_FALLBACKS])
+                         [grab_mcp.AUDIO_FIRST, "b", "h264-1", "h264-0"][:1 + grab_mcp.MAX_FALLBACKS])
 
     def test_silent_video_is_no_usable_audio(self):
         self.assert_error(grab_mcp.NO_AUDIO, TIKTOK + "?mode=silent")

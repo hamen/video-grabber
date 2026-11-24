@@ -58,6 +58,12 @@ MAX_FILE_BYTES = 300 * 1024 * 1024
 MAX_URL_LENGTH = 2048
 MAX_JOB_BYTES = 1 << 30
 MAX_FALLBACKS = 3
+# Best audio-only format first (smaller download), but never TikTok's "audio" format:
+# since yt-dlp 2026.11 it is the post's music track (music.playUrl), not the sound of
+# the video, so a voice-over video came back as an instrumental song with no words.
+# The filter applies to every site; of the allowed extractors only TikTok uses that id,
+# and "/b" still gets a format with its own audio.
+AUDIO_FIRST = "ba[format_id!=audio]/b"
 CHUNK_SECONDS = 300
 
 URL_NOT_ALLOWED = "URL not allowed: give an https link to a TikTok, Instagram, YouTube or X video"
@@ -195,7 +201,7 @@ def full_audio(media, jobdir, job):
 
 def media_with_audio(url, jobdir, job, cookies):
     """Download the audio first; if it is missing or cut, try formats with their own audio."""
-    media = download(url, jobdir, job, "ba/b", cookies)
+    media = download(url, jobdir, job, AUDIO_FIRST, cookies)
     try:
         if full_audio(media, jobdir, job):
             return media

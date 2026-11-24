@@ -27,8 +27,11 @@ MODE:
   hang         log "pid <own pid> <child pid>", start a child that sleeps, sleep
   grow         log "pid <own pid>", then grow media.<ext>.part without end (a fragmented
                download whose size yt-dlp does not know)
-  audioshort   with "-f ba/b", an audio-only M4A 1 second long (the info JSON says the
+  audioshort   with "-f ba...", an audio-only M4A 1 second long (the info JSON says the
                full length); any other format is complete
+  music        "-f ba/b" (no filter) picks the "audio" format, which is TikTok's music
+               track: an audio-only M4A 1.5 times the video length. "ba[format_id!=audio]"
+               finds no other audio-only format and falls back to "b", the full video.
 """
 import json
 import os
@@ -74,8 +77,13 @@ if mode == "grow":
             time.sleep(0.05)
     sys.exit(0)
 fmt = argv[argv.index("-f") + 1] if "-f" in argv else None
-audio_only = mode == "audioshort" and fmt == "ba/b"
-ext = "m4a" if audio_only else query.get("ext", "mp4")
+audio_only = mode == "audioshort" and (fmt or "").startswith("ba")
+# The only audio-only format is "audio" (TikTok's music track): the first selector gets
+# it unless it carries the filter that excludes it, and then yt-dlp goes on to "b".
+first = (fmt or "").split("/")[0]
+music = (mode == "music" and first.startswith("ba")
+         and "[format_id!=audio]" not in first)
+ext = "m4a" if audio_only or music else query.get("ext", "mp4")
 duration = float(query.get("dur", os.environ.get("FAKE_DURATION", "4")))
 path = Path(template.replace("%(uploader)s", "tester")
             .replace("%(id)s", query.get("id", "vid1")).replace("%(ext)s", ext))
@@ -96,9 +104,11 @@ if mode == "corrupt" or (mode == "mirrorbad" and fmt == "h264-1"):
     print(path)
     sys.exit(0)
 
-if audio_only:
+if audio_only or music:
+    length = duration * 1.5 if music else 1
     subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
-                    "sine=frequency=440:duration=1", "-c:a", "aac", str(path)], check=True)
+                    f"sine=frequency=440:duration={length}", "-c:a", "aac", str(path)],
+                   check=True)
     print(path)
     sys.exit(0)
 
